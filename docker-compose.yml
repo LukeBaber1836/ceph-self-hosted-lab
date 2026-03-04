@@ -1,0 +1,206 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared base — all Ceph containers use the same image and network
+# ─────────────────────────────────────────────────────────────────────────────
+x-ceph-base: &ceph-base
+  image: ${CEPH_IMAGE:-quay.io/ceph/daemon:latest}
+  # Required on Apple Silicon (arm64) — runs via Rosetta 2 emulation
+  platform: linux/amd64
+  restart: unless-stopped
+  networks:
+    - ceph-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ── Monitor ──────────────────────────────────────────────────────────────
+  # The cluster brain; bootstraps the FSID, keyrings, and bootstrap keys
+  # on first start and persists them in ./etc/ceph and ./var/lib/ceph/mon.
+  ceph-mon:
+    <<: *ceph-base
+    hostname: ceph-mon
+    command: mon
+    environment:
+      MON_IP: "${MON_IP:-172.20.0.10}"
+      CEPH_PUBLIC_NETWORK: "${CEPH_PUBLIC_NETWORK:-172.20.0.0/24}"
+    networks:
+      ceph-net:
+        ipv4_address: 172.20.0.10
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/mon:/var/lib/ceph/mon
+      - ./var/lib/ceph/bootstrap-osd:/var/lib/ceph/bootstrap-osd
+      - ./var/lib/ceph/bootstrap-mds:/var/lib/ceph/bootstrap-mds
+      - ./var/lib/ceph/bootstrap-rgw:/var/lib/ceph/bootstrap-rgw
+    healthcheck:
+      test: ["CMD", "ceph", "--connect-timeout", "5", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ── Manager + Dashboard ───────────────────────────────────────────────────
+  # Exposes the web dashboard on https://localhost:8443.
+  # bootstrap.sh enables the dashboard module and sets credentials.
+  ceph-mgr:
+    <<: *ceph-base
+    hostname: ceph-mgr
+    command: mgr
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/mgr:/var/lib/ceph/mgr
+    depends_on:
+      ceph-mon:
+        condition: service_healthy
+
+  # ── OSD 1 ─────────────────────────────────────────────────────────────────
+  # Directory-based OSD — uses a bind-mounted directory instead of a raw disk.
+  # Ideal for learning on Mac where raw block devices are unavailable.
+  ceph-osd-1:
+    <<: *ceph-base
+    hostname: ceph-osd-1
+    command: osd_directory_single
+    environment:
+      OSD_DEVICE: /var/lib/ceph/osd
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/bootstrap-osd:/var/lib/ceph/bootstrap-osd
+      - ./var/lib/ceph/osd1:/var/lib/ceph/osd
+    depends_on:
+      ceph-mon:
+        condition: service_healthy
+
+  # ── OSD 2 ─────────────────────────────────────────────────────────────────
+  ceph-osd-2:
+    <<: *ceph-base
+    hostname: ceph-osd-2
+    command: osd_directory_single
+    environment:
+      OSD_DEVICE: /var/lib/ceph/osd
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/bootstrap-osd:/var/lib/ceph/bootstrap-osd
+      - ./var/lib/ceph/osd2:/var/lib/ceph/osd
+    depends_on:
+      ceph-osd-1:
+        condition: service_started
+
+  # ── OSD 3 ─────────────────────────────────────────────────────────────────
+  ceph-osd-3:
+    <<: *ceph-base
+    hostname: ceph-osd-3
+    command: osd_directory_single
+    environment:
+      OSD_DEVICE: /var/lib/ceph/osd
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/bootstrap-osd:/var/lib/ceph/bootstrap-osd
+      - ./var/lib/ceph/osd3:/var/lib/ceph/osd
+    depends_on:
+      ceph-osd-2:
+        condition: service_started
+
+  # ── Metadata Server (CephFS) ──────────────────────────────────────────────
+  # CEPHFS_CREATE=1 auto-creates the cephfs pools and filesystem on first start.
+  ceph-mds:
+    <<: *ceph-base
+    hostname: ceph-mds
+    command: mds
+    environment:
+      MDS_NAME: mds-1
+      CEPHFS_CREATE: "1"
+      CEPHFS_DATA_POOL_PG: "32"
+      CEPHFS_METADATA_POOL_PG: "16"
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/mds:/var/lib/ceph/mds
+      - ./var/lib/ceph/bootstrap-mds:/var/lib/ceph/bootstrap-mds
+    depends_on:
+      ceph-osd-3:
+        condition: service_started
+
+  # ── RADOS Gateway (S3 / Swift) ────────────────────────────────────────────
+  # S3-compatible object storage endpoint at http://localhost:8080.
+  # bootstrap.sh creates the S3 user with credentials from .env.
+  ceph-rgw:
+    <<: *ceph-base
+    hostname: ceph-rgw
+    command: rgw
+    environment:
+      RGW_NAME: rgw-1
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./etc/ceph:/etc/ceph
+      - ./var/lib/ceph/radosgw:/var/lib/ceph/radosgw
+      - ./var/lib/ceph/bootstrap-rgw:/var/lib/ceph/bootstrap-rgw
+    depends_on:
+      ceph-osd-3:
+        condition: service_started
+
+  # ── Lab Client ───────────────────────────────────────────────────────────────
+  # A "client node" with all tools pre-installed: rbd, ceph-fuse, awscli, s3cmd.
+  # Interact with the cluster as a real client: docker compose exec ceph-client bash
+  ceph-client:
+    image: quay.io/ceph/ceph:v18
+    platform: linux/amd64
+    hostname: ceph-client
+    command: sleep infinity
+    restart: unless-stopped
+    networks:
+      - ceph-net
+    volumes:
+      - ./etc/ceph:/etc/ceph:ro
+    depends_on:
+      ceph-mon:
+        condition: service_healthy
+
+  # ── Prometheus ────────────────────────────────────────────────────────────────
+  # Scrapes Ceph metrics from the MGR prometheus module (port 9283).
+  prometheus:
+    image: prom/prometheus:latest
+    hostname: prometheus
+    restart: unless-stopped
+    networks:
+      - ceph-net
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - ceph-mgr
+
+  # ── Grafana ───────────────────────────────────────────────────────────────────
+  # Ceph cluster dashboards at http://localhost:3000  (admin / admin)
+  grafana:
+    image: grafana/grafana:latest
+    hostname: grafana
+    restart: unless-stopped
+    networks:
+      - ceph-net
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  ceph-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.20.0.0/24"
+
+volumes:
+  prometheus-data:
+  grafana-data:
