@@ -1,4 +1,4 @@
-# Ceph Learning Lab
+# Ceph Learning Lab for ARM Mac OS
 
 A Docker Compose–based Ceph cluster for self-learning on macOS (including Apple Silicon).  
 Provides all three Ceph storage interfaces plus a full monitoring stack and guided lab exercises.
