@@ -102,9 +102,13 @@ setup_osds() {
     # Run a temporary container to initialize the OSD directory.
     # ceph-osd --mkfs creates the bluestore block file and metadata in ceph-N/.
     # --entrypoint bash overrides the ceph/daemon entrypoint.
+    # Resolve the actual container ID for ceph-mon (the Compose service name is
+    # not the container name; it gets a project-specific prefix at runtime).
+    local mon_container
+    mon_container=$(docker compose ps -q ceph-mon)
     docker run --rm \
       --platform linux/amd64 \
-      --network ceph_deployment_ceph-net \
+      --network "container:${mon_container}" \
       -v "${osd_dir}:/var/lib/ceph/osd" \
       -v "${SCRIPT_DIR}/etc/ceph:/etc/ceph" \
       --entrypoint bash \
